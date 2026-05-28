@@ -1,15 +1,15 @@
 from contextlib import asynccontextmanager
+import os
+import secrets
 from typing import Any, AsyncIterator
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 
-WEBHOOK_URL = (
-    "https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
-    "?key=5b37e38b-6a50-40e9-b7bf-ab6ed563bce0"
-)
+WEBHOOK_URL_ENV = "WEBHOOK_URL"
+API_KEY_ENV = "API_KEY"
 DEFAULT_PICURL = "https://t.tutu.to/img/PqB5h"
 
 
@@ -20,6 +20,24 @@ class NewsRequest(BaseModel):
     description: str = Field(..., min_length=1)
     url: str = Field(..., min_length=1)
     picurl: str | None = None
+
+
+def get_required_env(name: str) -> str:
+    """读取必填环境变量，避免把敏感信息写死在代码里。"""
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise HTTPException(status_code=500, detail=f"服务未配置环境变量：{name}")
+    return value
+
+
+def verify_api_key(api_key: str | None) -> None:
+    """校验调用方密钥，防止公网接口被陌生人直接调用。"""
+    expected_api_key = get_required_env(API_KEY_ENV)
+    if not api_key or not secrets.compare_digest(api_key, expected_api_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API Key 无效",
+        )
 
 
 @asynccontextmanager
@@ -43,8 +61,14 @@ def hello_world() -> dict[str, str]:
 
 
 @app.post("/send-news")
-async def send_news(request: NewsRequest) -> dict[str, Any]:
+async def send_news(
+    request: NewsRequest,
+    api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> dict[str, Any]:
     """发送企微群聊机器人图文消息。"""
+    verify_api_key(api_key)
+    webhook_url = get_required_env(WEBHOOK_URL_ENV)
+
     picurl = (request.picurl or "").strip() or DEFAULT_PICURL
     payload = {
         "msgtype": "news",
@@ -63,7 +87,7 @@ async def send_news(request: NewsRequest) -> dict[str, Any]:
     client: httpx.AsyncClient = app.state.http_client
 
     try:
-        response = await client.post(WEBHOOK_URL, json=payload)
+        response = await client.post(webhook_url, json=payload)
         response.raise_for_status()
         result = response.json()
     except httpx.HTTPError as exc:
